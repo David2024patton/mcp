@@ -8,8 +8,9 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Hono } from "hono";
 import { createServer } from "./server.js";
+import { authorizeInitialize } from "./utils/accountAuth.js";
 import { createLogger } from "./utils/logger.js";
-import { requestAuthStorage } from "./utils/requestAuth.js";
+import { extractClientApiKey, requestAuthStorage } from "./utils/requestAuth.js";
 
 const PORT = 3000;
 const logger = createLogger("MCP-HTTP-Server");
@@ -18,25 +19,13 @@ const logger = createLogger("MCP-HTTP-Server");
 // must be opened with the caller's own Dokploy API key, and that key is
 // forwarded to Dokploy for the session's tool calls. The server holds no
 // key of its own; identity comes from the key the client presents.
-const requireClientKey = process.env.MCP_REQUIRE_CLIENT_KEY === "1";
-
-// Extract the caller's Dokploy API key from request headers. The key lives
-// in the "x-api-key" header. "Authorization" is accepted only when it uses
-// the Bearer scheme: gateways in front of this server may add their own
-// Authorization header (for example HTTP Basic auth as a door check), and
-// such a value must never be mistaken for a Dokploy key.
-function extractClientApiKey(header: (name: string) => string | undefined): string | undefined {
-  const headerKey = header("x-api-key");
-  if (headerKey) {
-    return headerKey;
-  }
-  const authorization = header("authorization");
-  if (authorization?.startsWith("Bearer ")) {
-    const token = authorization.slice("Bearer ".length).trim();
-    return token.length > 0 ? token : undefined;
-  }
-  return undefined;
-}
+//
+// Account-login mode: when MCP_REQUIRE_ACCOUNT_LOGIN=1, initialize also
+// requires the caller's own Dokploy account login (Authorization: Basic
+// base64(email:password)), verified live against Dokploy before any
+// session is created. Both gates live in authorizeInitialize
+// (utils/accountAuth.ts); the password itself never reaches this module,
+// only the verified account email does.
 
 const jsonrpcError = (code: number, message: string) => ({
   jsonrpc: "2.0" as const,
@@ -60,6 +49,11 @@ export async function main() {
     sse: {} as Record<string, SSEServerTransport>,
   };
 
+  // For sessions opened with a verified Dokploy account login
+  // (MCP_REQUIRE_ACCOUNT_LOGIN=1), only the account email and the fact
+  // that the login was verified are kept. Never the password.
+  const sessionAccounts = {} as Record<string, { email: string; accountLoginVerified: true }>;
+
   // Health check
   app.get("/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOString() }));
 
@@ -75,20 +69,31 @@ export async function main() {
       if (sessionId && transports.streamable[sessionId]) {
         transport = transports.streamable[sessionId];
       } else if (!sessionId && isInitializeRequest(body)) {
-        if (requireClientKey && !clientApiKey) {
+        // Gate: client key requirement (when enabled) and, when
+        // MCP_REQUIRE_ACCOUNT_LOGIN=1, live verification of the caller's
+        // Dokploy account login. Both run before any session exists.
+        const authorization = await authorizeInitialize({
+          clientApiKey,
+          authorization: c.req.header("authorization"),
+        });
+        if (!authorization.allowed) {
           return c.json(
-            jsonrpcError(
-              -32001,
-              "Unauthorized: this gateway requires your own Dokploy API key. Send it in the 'x-api-key' header (or as 'Authorization: Bearer <key>').",
-            ),
-            401,
+            jsonrpcError(-32001, authorization.message ?? "Unauthorized"),
+            authorization.status ?? 401,
           );
         }
+        const verifiedAccountEmail = authorization.email;
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid) => {
             transports.streamable[sid] = transport;
-            logger.info("New MCP session initialized", { sessionId: sid });
+            if (verifiedAccountEmail) {
+              sessionAccounts[sid] = { email: verifiedAccountEmail, accountLoginVerified: true };
+            }
+            logger.info("New MCP session initialized", {
+              sessionId: sid,
+              ...(verifiedAccountEmail ? { accountEmail: verifiedAccountEmail } : {}),
+            });
           },
         });
 
@@ -96,6 +101,7 @@ export async function main() {
           if (transport.sessionId) {
             logger.info("MCP session closed", { sessionId: transport.sessionId });
             delete transports.streamable[transport.sessionId];
+            delete sessionAccounts[transport.sessionId];
           }
         };
 
@@ -171,6 +177,7 @@ export async function main() {
       if (transports.streamable[sessionId]) {
         logger.info("MCP session terminated", { sessionId });
         delete transports.streamable[sessionId];
+        delete sessionAccounts[sessionId];
       }
       return neverResolve();
     } catch (error) {
