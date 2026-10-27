@@ -147,7 +147,17 @@ export async function verifyDokployAccountLogin(
   try {
     response = await fetchFn(`${dokployUrl}/api/auth/sign-in/email`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        // better-auth applies its origin check to browser-like clients
+        // (undici fetch sends Sec-Fetch headers) and answers 403
+        // MISSING_OR_NULL_ORIGIN when no Origin is present; that made
+        // every live verification from inside the gateway container fail
+        // as "rejected" (observed 2026-10-27). Sending the Dokploy
+        // origin makes this a first-party request.
+        Origin: dokployUrl,
+      },
       body: JSON.stringify({ email, password }),
       signal: AbortSignal.timeout(timeoutMs),
       redirect: "manual",
