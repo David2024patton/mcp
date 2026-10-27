@@ -128,6 +128,9 @@ describe("verifyDokployAccountLogin", () => {
     // Bare origin + /api/auth/sign-in/email, never a doubled /api.
     expect(url).toBe("https://dokploy.example/api/auth/sign-in/email");
     expect(init.method).toBe("POST");
+    // The Dokploy origin must be sent as Origin, or better-auth answers
+    // 403 MISSING_OR_NULL_ORIGIN for browser-like fetch clients.
+    expect(init.headers.Origin).toBe("https://dokploy.example");
     expect(JSON.parse(init.body)).toEqual({
       email: "user@example.com",
       password: "fake-password",
