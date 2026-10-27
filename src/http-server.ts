@@ -9,9 +9,34 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Hono } from "hono";
 import { createServer } from "./server.js";
 import { createLogger } from "./utils/logger.js";
+import { requestAuthStorage } from "./utils/requestAuth.js";
 
 const PORT = 3000;
 const logger = createLogger("MCP-HTTP-Server");
+
+// Per-user passthrough mode: when MCP_REQUIRE_CLIENT_KEY=1, every session
+// must be opened with the caller's own Dokploy API key, and that key is
+// forwarded to Dokploy for the session's tool calls. The server holds no
+// key of its own; identity comes from the key the client presents.
+const requireClientKey = process.env.MCP_REQUIRE_CLIENT_KEY === "1";
+
+// Extract the caller's Dokploy API key from request headers. The key lives
+// in the "x-api-key" header. "Authorization" is accepted only when it uses
+// the Bearer scheme: gateways in front of this server may add their own
+// Authorization header (for example HTTP Basic auth as a door check), and
+// such a value must never be mistaken for a Dokploy key.
+function extractClientApiKey(header: (name: string) => string | undefined): string | undefined {
+  const headerKey = header("x-api-key");
+  if (headerKey) {
+    return headerKey;
+  }
+  const authorization = header("authorization");
+  if (authorization?.startsWith("Bearer ")) {
+    const token = authorization.slice("Bearer ".length).trim();
+    return token.length > 0 ? token : undefined;
+  }
+  return undefined;
+}
 
 const jsonrpcError = (code: number, message: string) => ({
   jsonrpc: "2.0" as const,
@@ -43,12 +68,22 @@ export async function main() {
     const { incoming, outgoing } = c.env;
     try {
       const sessionId = c.req.header("mcp-session-id");
+      const clientApiKey = extractClientApiKey((name) => c.req.header(name));
       let transport: StreamableHTTPServerTransport;
       const body = await c.req.json();
 
       if (sessionId && transports.streamable[sessionId]) {
         transport = transports.streamable[sessionId];
       } else if (!sessionId && isInitializeRequest(body)) {
+        if (requireClientKey && !clientApiKey) {
+          return c.json(
+            jsonrpcError(
+              -32001,
+              "Unauthorized: this gateway requires your own Dokploy API key. Send it in the 'x-api-key' header (or as 'Authorization: Bearer <key>').",
+            ),
+            401,
+          );
+        }
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (sid) => {
@@ -78,7 +113,12 @@ export async function main() {
         );
       }
 
-      await transport.handleRequest(incoming, outgoing, body);
+      // Tool calls dispatched from here run inside the request's async
+      // context, so the API client sends the caller's key (when presented)
+      // rather than the server default.
+      await requestAuthStorage.run(clientApiKey ?? "", async () => {
+        await transport.handleRequest(incoming, outgoing, body);
+      });
       return neverResolve();
     } catch (error) {
       logger.error("Error handling HTTP request", {
@@ -97,9 +137,12 @@ export async function main() {
       return c.json(jsonrpcError(-32000, "Invalid or missing session ID"), 400);
     }
 
+    const clientApiKey = extractClientApiKey((name) => c.req.header(name));
     try {
       const transport = transports.streamable[sessionId];
-      await transport.handleRequest(incoming, outgoing);
+      await requestAuthStorage.run(clientApiKey ?? "", async () => {
+        await transport.handleRequest(incoming, outgoing);
+      });
       return neverResolve();
     } catch (error) {
       logger.error("Error handling GET request", {
@@ -118,9 +161,12 @@ export async function main() {
       return c.json(jsonrpcError(-32000, "Invalid or missing session ID"), 400);
     }
 
+    const clientApiKey = extractClientApiKey((name) => c.req.header(name));
     try {
       const transport = transports.streamable[sessionId];
-      await transport.handleRequest(incoming, outgoing);
+      await requestAuthStorage.run(clientApiKey ?? "", async () => {
+        await transport.handleRequest(incoming, outgoing);
+      });
 
       if (transports.streamable[sessionId]) {
         logger.info("MCP session terminated", { sessionId });
