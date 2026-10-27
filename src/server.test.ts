@@ -12,6 +12,7 @@ vi.mock("./utils/apiClient.js", () => ({
 
 const { createServer } = await import("./server.js");
 const { generatedTools } = await import("./generated/tools.js");
+const { customTools } = await import("./custom/tools.js");
 
 function countByTags(tags: string[]): number {
   const wanted = new Set(tags.map((tag) => tag.toLowerCase()));
@@ -45,7 +46,12 @@ describe("MCP server tools/list", () => {
 
   it("returns all tools by default", async () => {
     const tools = await getToolList();
-    expect(tools).toHaveLength(generatedTools.length);
+    expect(tools).toHaveLength(generatedTools.length + customTools.length);
+  });
+
+  it("includes the hand-written link-domain tool by default", async () => {
+    const tools = await getToolList();
+    expect(tools.map((tool) => tool.name)).toContain("link-domain");
   });
 
   it("supports DOKPLOY_TOOL_PRESET=minimal for clients sensitive to large toolsets", async () => {
@@ -98,7 +104,7 @@ describe("MCP server tools/list", () => {
 
     const tools = await getToolList();
 
-    expect(tools).toHaveLength(generatedTools.length);
+    expect(tools).toHaveLength(generatedTools.length + customTools.length);
   });
 
   it("every tool inputSchema has $schema set to draft 2020-12", async () => {
