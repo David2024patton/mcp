@@ -23,3 +23,26 @@ export function getRequestApiKey(): string | undefined {
   const key = requestAuthStorage.getStore();
   return key && key.length > 0 ? key : undefined;
 }
+
+/**
+ * Extract the caller's Dokploy API key from request headers. The key lives
+ * in the "x-api-key" header. "Authorization" is accepted only when it uses
+ * the Bearer scheme: gateways in front of this server may add their own
+ * Authorization header (for example HTTP Basic auth carrying the caller's
+ * Dokploy account login), and such a value must never be mistaken for a
+ * Dokploy key.
+ */
+export function extractClientApiKey(
+  header: (name: string) => string | undefined,
+): string | undefined {
+  const headerKey = header("x-api-key");
+  if (headerKey) {
+    return headerKey;
+  }
+  const authorization = header("authorization");
+  if (authorization?.startsWith("Bearer ")) {
+    const token = authorization.slice("Bearer ".length).trim();
+    return token.length > 0 ? token : undefined;
+  }
+  return undefined;
+}

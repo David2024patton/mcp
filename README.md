@@ -307,6 +307,8 @@ The configuration on Windows is slightly different compared to Linux or macOS. U
 |----------|----------|-------------|
 | `DOKPLOY_URL` | Yes | Your Dokploy server URL (e.g., `https://your-dokploy-server.com`) |
 | `DOKPLOY_API_KEY` | Yes | Your Dokploy API authentication token |
+| `MCP_REQUIRE_CLIENT_KEY` | No | Hosted HTTP mode only. When `1`, the server needs no key of its own: every client must present its own Dokploy API key (`x-api-key` header, or `Authorization: Bearer <key>`) to open a session, and that key is forwarded to Dokploy for the session's tool calls. |
+| `MCP_REQUIRE_ACCOUNT_LOGIN` | No | Hosted HTTP mode only. When `1`, opening a session additionally requires the caller's own Dokploy account login, sent as `Authorization: Basic base64(email:password)` and verified live against Dokploy (`POST /api/auth/sign-in/email`) before the session is created. A correct key with a wrong password is refused; if Dokploy cannot be reached to verify, the gateway fails closed with HTTP 503. The password is never stored or logged. |
 | `DOKPLOY_CUSTOM_HEADERS` | No | JSON object of additional upstream request headers. Header names and values must be strings. Reserved headers cannot be set here: `x-api-key`, `content-type`, `accept`. |
 | `DOKPLOY_TOOL_PRESET` | No | Predefined toolset to load: `all` (default), `minimal`, `core`, `deploy`, `databases`, or `git`. Useful for clients/providers that struggle with very large tool lists. |
 | `DOKPLOY_ENABLED_TAGS` | No | Comma-separated list of tags to filter which tools are loaded (e.g., `project,application,postgres`) |
