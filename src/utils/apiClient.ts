@@ -1,6 +1,7 @@
 import axios, { type AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from "axios";
 import { getClientConfig } from "./clientConfig.js";
 import { createLogger } from "./logger.js";
+import { getRequestApiKey } from "./requestAuth.js";
 
 // Extend the config interface to include metadata
 interface ExtendedAxiosRequestConfig extends InternalAxiosRequestConfig {
@@ -32,6 +33,22 @@ const apiClient = axios.create({
   timeout: config.timeout,
   headers: DEFAULT_HEADERS,
 });
+
+// Request interceptor - Use the caller's own Dokploy API key when the
+// current HTTP request presented one (per-user passthrough mode). The key
+// is applied at send time, so concurrent sessions for different users each
+// reach Dokploy with their own scope. Falls back to the configured default
+// token (from DOKPLOY_API_KEY) when no per-request key is present, which
+// preserves stdio and single-tenant behavior.
+export function applyRequestAuth(config: InternalAxiosRequestConfig): InternalAxiosRequestConfig {
+  const requestApiKey = getRequestApiKey();
+  if (requestApiKey) {
+    config.headers.set("x-api-key", requestApiKey);
+  }
+  return config;
+}
+
+apiClient.interceptors.request.use(applyRequestAuth);
 
 // Request interceptor - Add request timing and logging
 apiClient.interceptors.request.use(
