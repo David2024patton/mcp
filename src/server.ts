@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ZodObject, ZodRawShape } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { customTools } from "./custom/tools.js";
 import { generatedTools } from "./generated/tools.js";
 import { createHandler } from "./handler.js";
 import { createLogger } from "./utils/logger.js";
@@ -64,6 +65,17 @@ function getEnabledTools() {
     filtered = filtered.filter((tool) => !disabledTags.has(tool.tag.toLowerCase()));
   }
 
+  // Hand-written tools (src/custom) follow the same tag selection as the
+  // generated tools, so presets and tag overrides apply to them uniformly.
+  let filteredCustom =
+    selectedTags.size > 0
+      ? customTools.filter((tool) => selectedTags.has(tool.tag.toLowerCase()))
+      : customTools;
+
+  if (disabledTags.size > 0) {
+    filteredCustom = filteredCustom.filter((tool) => !disabledTags.has(tool.tag.toLowerCase()));
+  }
+
   const context = {
     total: generatedTools.length,
     loaded: filtered.length,
@@ -83,7 +95,7 @@ function getEnabledTools() {
     });
   }
 
-  return filtered;
+  return { generated: filtered, custom: filteredCustom };
 }
 
 function stripNestedSchemaKeys(value: unknown): void {
@@ -158,7 +170,7 @@ export function createServer() {
     version: "2.0.0",
   });
 
-  const tools = getEnabledTools();
+  const { generated: tools, custom: enabledCustomTools } = getEnabledTools();
 
   for (const tool of tools) {
     server.tool(
@@ -170,12 +182,33 @@ export function createServer() {
     );
   }
 
-  const toolList = tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    inputSchema: toDraft2020_12JsonSchema(tool.schema),
-    annotations: tool.annotations,
-  }));
+  // Hand-written tools (src/custom) are registered alongside the generated
+  // API tools. They carry their own handlers instead of proxying one API
+  // path; the tag selection above already decided which of them are on.
+  for (const custom of enabledCustomTools) {
+    server.tool(
+      custom.name,
+      custom.description,
+      custom.schema.shape,
+      custom.annotations ?? {},
+      custom.handler,
+    );
+  }
+
+  const toolList = [
+    ...tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: toDraft2020_12JsonSchema(tool.schema),
+      annotations: tool.annotations,
+    })),
+    ...enabledCustomTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: toDraft2020_12JsonSchema(tool.schema),
+      annotations: tool.annotations,
+    })),
+  ];
 
   server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: toolList,
