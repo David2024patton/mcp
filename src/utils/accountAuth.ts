@@ -17,9 +17,18 @@
  * The password is used exactly once, inside the sign-in verification
  * call, and is never stored or logged. Only a boolean outcome and the
  * account email may be kept per session.
+ *
+ * Gateway-token path: a client that can hold only ONE credential may
+ * instead present a gateway token (see utils/gatewayToken.ts), issued
+ * by /enroll after the account login and the API key were both verified
+ * once. A valid token authorizes initialize on its own and yields the
+ * embedded Dokploy API key as effectiveApiKey; a gt1. candidate that is
+ * invalid or expired is refused outright, never downgraded to the
+ * key/Basic gates below.
  */
 
 import { getClientConfig } from "./clientConfig.js";
+import { extractGatewayTokenCandidate, parseGatewayToken } from "./gatewayToken.js";
 
 export interface AccountCredentials {
   email: string;
@@ -45,6 +54,12 @@ export interface InitializeAuthorization {
   message?: string;
   /** The verified account email, present only when a login was verified. */
   email?: string;
+  /**
+   * The Dokploy API key to use for the session when authorization came
+   * from a gateway token: the key embedded in the token. Absent on the
+   * key/Basic paths, where the presented client key is used as before.
+   */
+  effectiveApiKey?: string;
 }
 
 const MISSING_KEY_MESSAGE =
@@ -54,6 +69,8 @@ const MISSING_LOGIN_MESSAGE =
 const REJECTED_LOGIN_MESSAGE = "Unauthorized: the Dokploy account login was rejected.";
 const UNAVAILABLE_MESSAGE =
   "Account login verification is unavailable: Dokploy could not be reached. Try again later.";
+const INVALID_GATEWAY_TOKEN_MESSAGE =
+  "Unauthorized: gateway token invalid or expired. Re-enroll at /enroll to get a new one.";
 
 /** Whether the account-login check is enabled (MCP_REQUIRE_ACCOUNT_LOGIN=1). */
 export function isAccountLoginRequired(): boolean {
@@ -188,6 +205,13 @@ export interface AuthorizeInitializeOptions {
  * Decide whether an initialize request may open a session.
  *
  * Order of checks:
+ * 0. Gateway token: when a gt1. candidate is present (x-api-key first,
+ *    else Authorization Bearer), it is decided here and nowhere else. A
+ *    valid token allows initialize and returns the token's account email
+ *    plus effectiveApiKey (the Dokploy API key embedded at enrollment).
+ *    An invalid or expired candidate is refused (401) with NO fall
+ *    through to the gates below, so a broken token can never be silently
+ *    downgraded to a weaker check.
  * 1. With MCP_REQUIRE_CLIENT_KEY=1, a missing API key is refused (401),
  *    exactly as the gateway behaved before this feature.
  * 2. With MCP_REQUIRE_ACCOUNT_LOGIN=1, missing or malformed Basic
@@ -201,6 +225,15 @@ export async function authorizeInitialize(
   input: AuthorizeInitializeInput,
   options: AuthorizeInitializeOptions = {},
 ): Promise<InitializeAuthorization> {
+  const gatewayToken = extractGatewayTokenCandidate(input.clientApiKey, input.authorization);
+  if (gatewayToken) {
+    const claims = parseGatewayToken(gatewayToken);
+    if (!claims) {
+      return { allowed: false, status: 401, message: INVALID_GATEWAY_TOKEN_MESSAGE };
+    }
+    return { allowed: true, email: claims.email, effectiveApiKey: claims.apiKey };
+  }
+
   if (isClientKeyRequired() && !input.clientApiKey) {
     return { allowed: false, status: 401, message: MISSING_KEY_MESSAGE };
   }

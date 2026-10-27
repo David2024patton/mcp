@@ -308,7 +308,10 @@ The configuration on Windows is slightly different compared to Linux or macOS. U
 | `DOKPLOY_URL` | Yes | Your Dokploy server URL (e.g., `https://your-dokploy-server.com`) |
 | `DOKPLOY_API_KEY` | Yes | Your Dokploy API authentication token |
 | `MCP_REQUIRE_CLIENT_KEY` | No | Hosted HTTP mode only. When `1`, the server needs no key of its own: every client must present its own Dokploy API key (`x-api-key` header, or `Authorization: Bearer <key>`) to open a session, and that key is forwarded to Dokploy for the session's tool calls. |
-| `MCP_REQUIRE_ACCOUNT_LOGIN` | No | Hosted HTTP mode only. When `1`, opening a session additionally requires the caller's own Dokploy account login, sent as `Authorization: Basic base64(email:password)` and verified live against Dokploy (`POST /api/auth/sign-in/email`) before the session is created. A correct key with a wrong password is refused; if Dokploy cannot be reached to verify, the gateway fails closed with HTTP 503. The password is never stored or logged. |
+| `MCP_REQUIRE_ACCOUNT_LOGIN` | No | Hosted HTTP mode only. When `1`, opening a session additionally requires the caller's own Dokploy account login, sent as `Authorization: Basic base64(email:password)` and verified live against Dokploy (`POST /api/auth/sign-in/email`) before the session is created. A correct key with a wrong password is refused; if Dokploy cannot be reached to verify, the gateway fails closed with HTTP 503. The password is never stored or logged. A gateway token (see below) also satisfies this gate. |
+| `MCP_GATEWAY_TOKEN_ENROLLMENT` | No | Hosted HTTP mode only. When `1` and `GATEWAY_TOKEN_SECRET` is set, exposes the `/enroll` page where a caller exchanges a one-time proof of both their Dokploy account login and their Dokploy API key for a single gateway token. Without both settings the routes do not exist (404). |
+| `GATEWAY_TOKEN_SECRET` | No | Secret used to encrypt and authenticate gateway tokens (AES-256-GCM) and to sign the enrollment form nonce. If it base64-decodes to exactly 32 bytes it is used as the raw key, otherwise it is hashed with SHA-256. Rotating it revokes every issued gateway token at once. |
+| `GATEWAY_TOKEN_TTL_DAYS` | No | Gateway token lifetime in days (default: `30`, clamped to 1-365). |
 | `DOKPLOY_CUSTOM_HEADERS` | No | JSON object of additional upstream request headers. Header names and values must be strings. Reserved headers cannot be set here: `x-api-key`, `content-type`, `accept`. |
 | `DOKPLOY_TOOL_PRESET` | No | Predefined toolset to load: `all` (default), `minimal`, `core`, `deploy`, `databases`, or `git`. Useful for clients/providers that struggle with very large tool lists. |
 | `DOKPLOY_ENABLED_TAGS` | No | Comma-separated list of tags to filter which tools are loaded (e.g., `project,application,postgres`) |
@@ -318,6 +321,17 @@ The configuration on Windows is slightly different compared to Linux or macOS. U
 | `DOKPLOY_RETRY_DELAY` | No | Delay between retries in milliseconds (default: `1000`) |
 | `DOKPLOY_REDACT_ENV` | No | Redacts secret-bearing fields (env vars, compose files, passwords, tokens, keys) from API responses before they reach the MCP client (default: `true`). Set to `false` only if you explicitly need raw secret values in LLM context. |
 | `DOKPLOY_REDACT_FIELDS` | No | Comma-separated list of response field names to redact when `DOKPLOY_REDACT_ENV=true`. Matched case-insensitively at any nesting depth. Defaults to: `env`, `buildArgs`, `composeFile`, `dockerCompose`, `environment`, `buildSecrets`, `previewBuildSecrets`, `password`, `currentPassword`, `appPassword`, `databasePassword`, `databaseRootPassword`, `redisPassword`, `mariadbPassword`, `mongoPassword`, `mysqlPassword`, `postgresPassword`, `registryPassword`, `token`, `accessToken`, `appToken`, `apiToken`, `botToken`, `refreshToken`, `secret`, `clientSecret`, `apiKey`, `secretAccessKey`, `accessKey`, `licenseKey`, `userKey`, `privateKey`, `privateKeyPass`, `encPrivateKey`, `encPrivateKeyPass`, `sshKey`, `sshPrivateKey`, `customGitSSHKey`, `dockerAuth`. |
+
+### Gateway token enrollment
+
+Some MCP clients can store only a single credential per connection, so they cannot send both an API key header and an `Authorization: Basic` account login at initialize. Gateway tokens bridge that gap without dropping either check:
+
+1. Enable enrollment on the hosted gateway with `MCP_GATEWAY_TOKEN_ENROLLMENT=1` and a long random `GATEWAY_TOKEN_SECRET`.
+2. The caller opens `https://<gateway>/enroll` and enters their Dokploy email, account password, and API key once. The gateway verifies the login live against Dokploy and proves the API key against Dokploy's project list. The password is never stored or logged.
+3. On success the caller receives one gateway token (`gt1.` followed by encrypted data) and stores it in the client as the only credential, in the same field the API key used before (`x-api-key` header or `Authorization: Bearer`). The server URL does not change.
+4. The gateway decrypts the token per request and runs tool calls with the Dokploy API key embedded at enrollment.
+
+The design is stateless: the token is an AES-256-GCM encrypted payload (`{ v, email, apiKey, iat, exp, jti }`) and the server stores nothing per token. Tokens expire after `GATEWAY_TOKEN_TTL_DAYS` (default 30 days, clamped to 1-365); an expired or invalid token is refused with instructions to re-enroll, never downgraded to a weaker check. Rotating `GATEWAY_TOKEN_SECRET` revokes every issued token at once. Treat a gateway token like a password: never paste it into chat.
 
 For Dokploy instances behind Cloudflare Access or a similar reverse proxy, pass service-token headers with placeholder values like this:
 

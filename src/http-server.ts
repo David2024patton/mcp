@@ -7,8 +7,10 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { Hono } from "hono";
+import { registerGatewayEnrollment } from "./enroll.js";
 import { createServer } from "./server.js";
 import { authorizeInitialize } from "./utils/accountAuth.js";
+import { extractGatewayTokenCandidate, parseGatewayToken } from "./utils/gatewayToken.js";
 import { createLogger } from "./utils/logger.js";
 import { extractClientApiKey, requestAuthStorage } from "./utils/requestAuth.js";
 
@@ -26,12 +28,44 @@ const logger = createLogger("MCP-HTTP-Server");
 // session is created. Both gates live in authorizeInitialize
 // (utils/accountAuth.ts); the password itself never reaches this module,
 // only the verified account email does.
+//
+// Gateway-token mode: a gt1. token (issued by /enroll after a one-time
+// check of BOTH the account login and the API key) may be presented as
+// the client's single credential. authorizeInitialize validates it at
+// initialize; on later session requests this module resolves the token
+// back to its embedded Dokploy API key so tool calls keep running with
+// the caller's own key, never with the token itself.
 
 const jsonrpcError = (code: number, message: string) => ({
   jsonrpc: "2.0" as const,
   error: { code, message },
   id: null,
 });
+
+const GATEWAY_TOKEN_INVALID_MESSAGE =
+  "Unauthorized: gateway token invalid or expired. Re-enroll at /enroll to get a new one.";
+
+/**
+ * Resolve the Dokploy API key a request should act with. Without a
+ * gateway-token candidate this is exactly the presented client key. With
+ * a gt1. candidate it is the key embedded in the token; an invalid or
+ * expired candidate resolves to no key and is flagged so the caller can
+ * refuse the request instead of forwarding the token itself upstream.
+ */
+function resolvePresentedApiKey(
+  clientApiKey: string | undefined,
+  authorization: string | undefined,
+): { apiKey: string | undefined; invalidGatewayToken: boolean } {
+  const candidate = extractGatewayTokenCandidate(clientApiKey, authorization);
+  if (!candidate) {
+    return { apiKey: clientApiKey, invalidGatewayToken: false };
+  }
+  const claims = parseGatewayToken(candidate);
+  if (!claims) {
+    return { apiKey: undefined, invalidGatewayToken: true };
+  }
+  return { apiKey: claims.apiKey, invalidGatewayToken: false };
+}
 
 // When MCP transport takes over the raw Node response, we must prevent
 // Hono/@hono/node-server from trying to write its own response headers.
@@ -54,6 +88,11 @@ export async function main() {
   // that the login was verified are kept. Never the password.
   const sessionAccounts = {} as Record<string, { email: string; accountLoginVerified: true }>;
 
+  // Gateway-token enrollment (GET/POST /enroll). Registers nothing
+  // unless MCP_GATEWAY_TOKEN_ENROLLMENT=1 and GATEWAY_TOKEN_SECRET is
+  // set, in which case these are the only routes it adds.
+  registerGatewayEnrollment(app);
+
   // Health check
   app.get("/health", (c) => c.json({ status: "ok", timestamp: new Date().toISOString() }));
 
@@ -63,10 +102,15 @@ export async function main() {
     try {
       const sessionId = c.req.header("mcp-session-id");
       const clientApiKey = extractClientApiKey((name) => c.req.header(name));
+      const presented = resolvePresentedApiKey(clientApiKey, c.req.header("authorization"));
+      let effectiveApiKey = presented.apiKey;
       let transport: StreamableHTTPServerTransport;
       const body = await c.req.json();
 
       if (sessionId && transports.streamable[sessionId]) {
+        if (presented.invalidGatewayToken) {
+          return c.json(jsonrpcError(-32001, GATEWAY_TOKEN_INVALID_MESSAGE), 401);
+        }
         transport = transports.streamable[sessionId];
       } else if (!sessionId && isInitializeRequest(body)) {
         // Gate: client key requirement (when enabled) and, when
@@ -82,6 +126,7 @@ export async function main() {
             authorization.status ?? 401,
           );
         }
+        effectiveApiKey = authorization.effectiveApiKey ?? effectiveApiKey;
         const verifiedAccountEmail = authorization.email;
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
@@ -121,8 +166,9 @@ export async function main() {
 
       // Tool calls dispatched from here run inside the request's async
       // context, so the API client sends the caller's key (when presented)
-      // rather than the server default.
-      await requestAuthStorage.run(clientApiKey ?? "", async () => {
+      // rather than the server default. For a gateway-token session the
+      // effective key is the one embedded in the token, resolved above.
+      await requestAuthStorage.run(effectiveApiKey ?? "", async () => {
         await transport.handleRequest(incoming, outgoing, body);
       });
       return neverResolve();
@@ -144,9 +190,13 @@ export async function main() {
     }
 
     const clientApiKey = extractClientApiKey((name) => c.req.header(name));
+    const presented = resolvePresentedApiKey(clientApiKey, c.req.header("authorization"));
+    if (presented.invalidGatewayToken) {
+      return c.json(jsonrpcError(-32001, GATEWAY_TOKEN_INVALID_MESSAGE), 401);
+    }
     try {
       const transport = transports.streamable[sessionId];
-      await requestAuthStorage.run(clientApiKey ?? "", async () => {
+      await requestAuthStorage.run(presented.apiKey ?? "", async () => {
         await transport.handleRequest(incoming, outgoing);
       });
       return neverResolve();
@@ -168,9 +218,13 @@ export async function main() {
     }
 
     const clientApiKey = extractClientApiKey((name) => c.req.header(name));
+    const presented = resolvePresentedApiKey(clientApiKey, c.req.header("authorization"));
+    if (presented.invalidGatewayToken) {
+      return c.json(jsonrpcError(-32001, GATEWAY_TOKEN_INVALID_MESSAGE), 401);
+    }
     try {
       const transport = transports.streamable[sessionId];
-      await requestAuthStorage.run(clientApiKey ?? "", async () => {
+      await requestAuthStorage.run(presented.apiKey ?? "", async () => {
         await transport.handleRequest(incoming, outgoing);
       });
 

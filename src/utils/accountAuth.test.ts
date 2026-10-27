@@ -6,6 +6,7 @@ import {
   parseBasicAuthCredentials,
   verifyDokployAccountLogin,
 } from "./accountAuth.js";
+import { issueGatewayToken } from "./gatewayToken.js";
 import { extractClientApiKey } from "./requestAuth.js";
 
 const ENV_KEYS = [
@@ -13,6 +14,8 @@ const ENV_KEYS = [
   "DOKPLOY_API_KEY",
   "MCP_REQUIRE_CLIENT_KEY",
   "MCP_REQUIRE_ACCOUNT_LOGIN",
+  "GATEWAY_TOKEN_SECRET",
+  "GATEWAY_TOKEN_TTL_DAYS",
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 for (const key of ENV_KEYS) {
@@ -340,5 +343,97 @@ describe("authorizeInitialize", () => {
       applyRequestAuth(config);
     });
     expect(config.headers.get("x-api-key")).toBe("caller-key");
+  });
+});
+
+describe("authorizeInitialize gateway-token path", () => {
+  const REENROLL_MESSAGE =
+    "Unauthorized: gateway token invalid or expired. Re-enroll at /enroll to get a new one.";
+
+  function issueTestToken(now: number = Date.now()): string {
+    process.env.GATEWAY_TOKEN_SECRET = "unit-test-secret";
+    const token = issueGatewayToken({
+      email: "user@example.com",
+      apiKey: "embedded-caller-key",
+      now,
+    });
+    if (!token) {
+      throw new Error("expected a token to be issued");
+    }
+    return token;
+  }
+
+  it("allows a valid token in x-api-key with no Basic login and returns effectiveApiKey", async () => {
+    process.env.MCP_REQUIRE_CLIENT_KEY = "1";
+    process.env.MCP_REQUIRE_ACCOUNT_LOGIN = "1";
+    const verifyFn = vi.fn(async (): Promise<AccountLoginVerification> => "rejected");
+
+    const result = await authorizeInitialize(
+      { clientApiKey: issueTestToken(), authorization: undefined },
+      { verifyFn },
+    );
+
+    expect(result).toEqual({
+      allowed: true,
+      email: "user@example.com",
+      effectiveApiKey: "embedded-caller-key",
+    });
+    expect(verifyFn).not.toHaveBeenCalled();
+  });
+
+  it("allows a valid token carried as a Bearer value", async () => {
+    process.env.MCP_REQUIRE_CLIENT_KEY = "1";
+    process.env.MCP_REQUIRE_ACCOUNT_LOGIN = "1";
+    const verifyFn = vi.fn(async (): Promise<AccountLoginVerification> => "rejected");
+    const token = issueTestToken();
+
+    const result = await authorizeInitialize(
+      { clientApiKey: undefined, authorization: `Bearer ${token}` },
+      { verifyFn },
+    );
+
+    expect(result).toEqual({
+      allowed: true,
+      email: "user@example.com",
+      effectiveApiKey: "embedded-caller-key",
+    });
+    expect(verifyFn).not.toHaveBeenCalled();
+  });
+
+  it("refuses an invalid gt1. token with the re-enroll message and never falls through to Basic", async () => {
+    process.env.MCP_REQUIRE_CLIENT_KEY = "1";
+    process.env.MCP_REQUIRE_ACCOUNT_LOGIN = "1";
+    const verifyFn = vi.fn(async (): Promise<AccountLoginVerification> => "verified");
+    const token = issueTestToken();
+    const flipAt = Math.floor(token.length / 2);
+    const tampered =
+      token.slice(0, flipAt) + (token[flipAt] === "A" ? "B" : "A") + token.slice(flipAt + 1);
+
+    const result = await authorizeInitialize(
+      {
+        clientApiKey: tampered,
+        authorization: basic("user@example.com", "fake-password"),
+      },
+      { verifyFn },
+    );
+
+    expect(result).toEqual({ allowed: false, status: 401, message: REENROLL_MESSAGE });
+    expect(verifyFn).not.toHaveBeenCalled();
+  });
+
+  it("refuses an expired gt1. token with the re-enroll message", async () => {
+    process.env.MCP_REQUIRE_CLIENT_KEY = "1";
+    process.env.MCP_REQUIRE_ACCOUNT_LOGIN = "1";
+    process.env.GATEWAY_TOKEN_TTL_DAYS = "1";
+    const verifyFn = vi.fn(async (): Promise<AccountLoginVerification> => "verified");
+    const expired = issueTestToken(Date.now() - 2 * 86_400_000);
+
+    const result = await authorizeInitialize(
+      { clientApiKey: expired, authorization: undefined },
+      { verifyFn },
+    );
+
+    expect(result).toEqual({ allowed: false, status: 401, message: REENROLL_MESSAGE });
+    expect(verifyFn).not.toHaveBeenCalled();
   });
 });
