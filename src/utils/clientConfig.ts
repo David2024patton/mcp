@@ -81,11 +81,18 @@ class ConfigManager {
   private loadConfig(): Config {
     const dokployUrl = process.env.DOKPLOY_URL;
     const authToken = process.env.DOKPLOY_API_KEY;
+    // Per-user passthrough mode (MCP_REQUIRE_CLIENT_KEY=1): the server does
+    // not need a key of its own. Every HTTP request must present the caller's
+    // Dokploy API key, which is forwarded to Dokploy per request, so a
+    // missing DOKPLOY_API_KEY is not an error. A configured token is still
+    // honored as the default when a request carries no key. Stdio mode is
+    // unaffected: without the flag, DOKPLOY_API_KEY stays required.
+    const requireClientKey = process.env.MCP_REQUIRE_CLIENT_KEY === "1";
 
     if (!dokployUrl) {
       throw new Error("Environment variable DOKPLOY_URL is not defined");
     }
-    if (!authToken) {
+    if (!authToken && !requireClientKey) {
       throw new Error("Environment variable DOKPLOY_API_KEY is not defined");
     }
 
@@ -98,7 +105,7 @@ class ConfigManager {
 
     return {
       dokployUrl,
-      authToken,
+      authToken: authToken ?? "",
       customHeaders: parseCustomHeaders(process.env.DOKPLOY_CUSTOM_HEADERS),
       timeout: parseInt(process.env.DOKPLOY_TIMEOUT || "30000", 10),
       retryAttempts: parseInt(process.env.DOKPLOY_RETRY_ATTEMPTS || "3", 10),
